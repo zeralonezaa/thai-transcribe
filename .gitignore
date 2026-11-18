@@ -1,0 +1,15 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# โมเดลที่ดาวน์โหลด (ใหญ่ ~3GB — ผู้ใช้โหลดเองตอนรันครั้งแรก)
+models/
+
+# ผลลัพธ์ที่สร้างใหม่ได้จากการรันทดสอบ
+samples/*.srt
+samples/*.txt
+samples/*.json
+
+# macOS
+.DS_Store

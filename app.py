@@ -16,7 +16,9 @@ from pathlib import Path
 
 import gradio as gr
 
+import summarize as S
 import transcribe as T
+from docx_export import export_docx
 
 # จำกัดความยาวไฟล์ (วินาที) — ปรับได้ตามกำลังเซิร์ฟเวอร์ เช่นบน Hugging Face
 #  Space ที่เป็น CPU ฟรี ควรคุมไว้ราว 10 นาที
@@ -27,10 +29,12 @@ AUDIO_EXTS = [".mp3", ".wav", ".m4a", ".aac", ".ogg", ".oga", ".flac",
 
 
 def transcribe_file(file_path, speakers: int, model: str, show_label: bool,
-                    progress=gr.Progress()):
-    """handler หลัก: ไฟล์เสียง -> (ไฟล์ SRT, บทถอดควาย, สรุป)"""
+                    names_text: str, do_summary: bool, progress=gr.Progress()):
+    """handler หลัก: ไฟล์เสียง -> (SRT, DOCX, บทถอดความ, สรุป MoM, สถานะ)"""
     if not file_path:
         raise gr.Error("กรุณาเลือกไฟล์เสียง/วิดีโอก่อนกดปุ่ม 'ถอดเสียง'")
+
+    names = [n.strip() for n in (names_text or "").split(",") if n.strip()] or None
 
     progress(0.05, desc="กำลังอ่านไฟล์เสียง...")
     audio = T.decode_audio(file_path)
@@ -49,10 +53,19 @@ def transcribe_file(file_path, speakers: int, model: str, show_label: bool,
         speakers=speakers if speakers and speakers > 0 else None,
     )
 
-    progress(0.9, desc="กำลังจัดรูปคำบรรยาย...")
+    progress(0.85, desc="กำลังจัดรูปคำบรรยาย...")
     utts, n_spk = result["utterances"], result["n_speakers"]
-    srt_text = T.render_srt(utts, n_spk, speaker_label=show_label)
-    txt_text = T.render_txt(utts, n_spk)
+    srt_text = T.render_srt(utts, n_spk, speaker_label=show_label, names=names)
+    txt_text = T.render_txt(utts, n_spk, names=names)
+
+    # สรุปการประชุมด้วย LLM (ถ้าติ๊กและมี API key)
+    summary_md = ""
+    if do_summary:
+        progress(0.93, desc="กำลังสรุปการประชุมด้วย AI...")
+        try:
+            summary_md = S.summarize_meeting(txt_text)
+        except RuntimeError as e:
+            summary_md = f"(ไม่สามารถสรุปได้: {e})"
 
     stem = Path(file_path).stem or "transcript"
     srt_file = tempfile.NamedTemporaryFile(
@@ -60,10 +73,18 @@ def transcribe_file(file_path, speakers: int, model: str, show_label: bool,
     srt_file.write(srt_text)
     srt_file.close()
 
-    summary = (f"✅ เสร็จเรียบร้อย — ผู้พูด {n_spk} คน | ประโยค {len(utts)} | "
-               f"ความยาว {T.clock(duration)} | ภาษา {result['language']} "
-               f"({result['language_probability']:.0%})")
-    return srt_file.name, txt_text, summary
+    meta = {"source": Path(file_path).name, "duration": duration,
+            "num_speakers": n_spk, "language": result["language"],
+            "speaker_names": names or []}
+    docx_file = tempfile.NamedTemporaryFile(
+        prefix=f"{stem}_", suffix=".docx", delete=False)
+    docx_file.close()
+    export_docx(docx_file.name, utts, meta, summary_md or None)
+
+    summary_status = (f"✅ เสร็จเรียบร้อย — ผู้พูด {n_spk} คน | ประโยค {len(utts)} | "
+                      f"ความยาว {T.clock(duration)} | ภาษา {result['language']} "
+                      f"({result['language_probability']:.0%})")
+    return srt_file.name, docx_file.name, txt_text, summary_md, summary_status
 
 
 def build_ui() -> gr.Blocks:
@@ -97,18 +118,33 @@ def build_ui() -> gr.Blocks:
                     info="small = เร็ว | medium = สมดุล | large-v3 = แม่นสุดแต่ช้ามาก",
                 )
                 label_in = gr.Checkbox(value=True, label="ใส่ชื่อผู้พูดในคำบรรยาย")
+                names_in = gr.Textbox(
+                    label="ชื่อผู้พูด (ไม่ใส่ก็ได้)",
+                    placeholder="เช่น สมชาย,สุชาดา — เรียงตามลำดับคนที่เริ่มพูดก่อน",
+                )
+                summary_in = gr.Checkbox(
+                    value=False, label="สรุปการประชุมด้วย AI (MoM)",
+                    info=("ต้องตั้งค่า SUMMARY_API_KEY บนเซิร์ฟเวอร์"
+                          + (" — พร้อมใช้งาน ✓" if S.has_api_key() else " (ยังไม่ได้ตั้งค่า)")),
+                )
                 btn = gr.Button("🚀 ถอดเสียง", variant="primary")
             with gr.Column():
                 summary_out = gr.Markdown("⏳ ยังไม่มีผลลัพธ์")
                 srt_out = gr.File(label="ดาวน์โหลดคำบรรยาย (SRT)")
+                docx_out = gr.File(label="ดาวน์โหลดบันทึกการประชุม (Word)")
                 txt_out = gr.Textbox(
                     label="บทถอดความ (พร้อมชื่อผู้พูดและเวลา)",
-                    lines=14, max_lines=25, buttons=["copy"],
+                    lines=12, max_lines=20, buttons=["copy"],
+                )
+                mom_out = gr.Textbox(
+                    label="สรุปการประชุม (MoM)",
+                    lines=8, max_lines=20, buttons=["copy"],
+                    placeholder="ติ๊ก 'สรุปการประชุมด้วย AI' ก่อนกดปุ่ม เพื่อรับสรุปหัวข้อ/มติ/สิ่งที่ต้องทำต่อ",
                 )
         btn.click(
             transcribe_file,
-            inputs=[file_in, speakers_in, model_in, label_in],
-            outputs=[srt_out, txt_out, summary_out],
+            inputs=[file_in, speakers_in, model_in, label_in, names_in, summary_in],
+            outputs=[srt_out, docx_out, txt_out, mom_out, summary_out],
             api_name="transcribe",
         )
         gr.Markdown(

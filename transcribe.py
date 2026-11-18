@@ -357,8 +357,17 @@ def split_blocks(words: list[dict], max_chars=80, max_dur=6.0) -> list[list[dict
     return blocks
 
 
+def speaker_name(spk_idx: int, n_speakers: int, names=None, template="ผู้พูด {n}") -> str:
+    """ชื่อที่ใช้แสดงของผู้พูด: ชื่อจริง (ถ้าระบุ) หรือ 'ผู้พูด N'"""
+    if n_speakers > 1:
+        if names and spk_idx < len(names) and names[spk_idx]:
+            return names[spk_idx]
+        return template.format(n=spk_idx + 1)
+    return "ผู้พูด"
+
+
 def render_srt(utterances, n_speakers: int, speaker_template="ผู้พูด {n}",
-               max_chars=80, max_duration=6.0, speaker_label=True) -> str:
+               max_chars=80, max_duration=6.0, speaker_label=True, names=None) -> str:
     """เรนเดอร์คำบรรยายเป็นข้อความ SRT"""
     out = []
     idx = 1
@@ -372,17 +381,18 @@ def render_srt(utterances, n_speakers: int, speaker_template="ผู้พูด
             if not text:
                 continue
             if speaker_label and n_speakers > 1:
-                text = f"{speaker_template.format(n=u['speaker'] + 1)}\n{text}"
+                name = speaker_name(u["speaker"], n_speakers, names, speaker_template)
+                text = f"{name}\n{text}"
             out.append(f"{idx}\n{srt_ts(start)} --> {srt_ts(end)}\n{text}\n\n")
             idx += 1
     return "".join(out)
 
 
-def render_txt(utterances, n_speakers: int, speaker_template="ผู้พูด {n}") -> str:
+def render_txt(utterances, n_speakers: int, speaker_template="ผู้พูด {n}", names=None) -> str:
     """เรนเดอร์บทถอดความเป็นข้อความ TXT"""
     lines = []
     for u in utterances:
-        name = speaker_template.format(n=u["speaker"] + 1) if n_speakers > 1 else "ผู้พูด"
+        name = speaker_name(u["speaker"], n_speakers, names, speaker_template)
         lines.append(f"[{clock(u['start'])}] {name}: {u['text']}")
     return "\n".join(lines) + ("\n" if lines else "")
 
@@ -407,14 +417,14 @@ def render_json(utterances, meta: dict) -> str:
     return json.dumps(data, ensure_ascii=False, indent=2)
 
 
-def write_srt(path: Path, utterances, n_speakers: int, args) -> None:
+def write_srt(path: Path, utterances, n_speakers: int, args, names=None) -> None:
     path.write_text(render_srt(utterances, n_speakers, args.speaker_template,
                                args.max_chars, args.max_duration,
-                               not args.no_speaker_label), encoding="utf-8")
+                               not args.no_speaker_label, names), encoding="utf-8")
 
 
-def write_txt(path: Path, utterances, n_speakers: int, args) -> None:
-    path.write_text(render_txt(utterances, n_speakers, args.speaker_template),
+def write_txt(path: Path, utterances, n_speakers: int, args, names=None) -> None:
+    path.write_text(render_txt(utterances, n_speakers, args.speaker_template, names),
                     encoding="utf-8")
 
 
@@ -525,6 +535,14 @@ def parse_args(argv=None):
                    help="ไม่ใส่ชื่อผู้พูดในไฟล์ SRT (เหมาะกับการเบิร์นลงวิดีโอ)")
     p.add_argument("--speaker-template", default="ผู้พูด {n}",
                    help="รูปแบบชื่อผู้พูด เช่น 'Speaker {n}' หรือ 'พิธีกร {n}'")
+    p.add_argument("--speaker-names", default=None,
+                   help="ชื่อจริงของผู้พูดคั่นด้วยจุลภาค เรียงตามลำดับที่เริ่มพูดก่อน "
+                        "เช่น 'สมชาย,สุชาดา,วิภา' (จะแทนที่ 'ผู้พูด 1,2,3')")
+    p.add_argument("--summarize", action="store_true",
+                   help="สรุปการประชุม (MoM) ด้วย LLM — ตั้งค่า SUMMARY_API_KEY ก่อน "
+                        "(ดู summarize.py)")
+    p.add_argument("--no-docx", action="store_true",
+                   help="ไม่ต้องสร้างไฟล์บันทึกการประชุม .docx (ค่าเริ่มต้นสร้างเสมอ)")
     p.add_argument("--max-chars", type=int, default=80, help="อักขระสูงสุดต่อบล็อกคำบรรยาย")
     p.add_argument("--max-duration", type=float, default=6.0, help="วินาทีสูงสุดต่อบล็อกคำบรรยาย")
     p.add_argument("--initial-prompt", default=None,
@@ -572,22 +590,50 @@ def main(argv=None):
             "duration": result["duration"]}
     log(f"      ภาษาที่ตรวจพบ: {info['language']} ({info['language_probability']:.0%})")
 
+    # --- ชื่อผู้พูดจริง: "สมชาย,สุชาดา" -> ผู้พูด 1,2 (ตามลำดับที่เริ่มพูดก่อน) ---
+    names = None
+    if args.speaker_names:
+        names = [n.strip() for n in args.speaker_names.split(",") if n.strip()]
+        if len(names) != n_speakers:
+            log(f"      หมายเหตุ: ระบุชื่อ {len(names)} ชื่อ แต่พบผู้พูด {n_speakers} คน "
+                f"— ตำแหน่งที่ไม่มีชื่อจะใช้ 'ผู้พูด N' แทน")
+
+    # --- สรุปการประชุมด้วย LLM (ถ้าขอ) ---
+    summary_md = None
+    if args.summarize:
+        import summarize
+        log("[4/4] สรุปการประชุมด้วย LLM ...")
+        try:
+            transcript = render_txt(utterances, n_speakers, args.speaker_template, names)
+            summary_md = summarize.summarize_meeting(transcript)
+            log("      สรุปสำเร็จ")
+        except RuntimeError as e:
+            log(f"      ข้ามการสรุป: {e}")
+
     # --- เขียนผลลัพธ์ ---
-    log(f"[4/4] เขียนไฟล์ผลลัพธ์ -> {out_dir}/")
-    write_srt(base.with_suffix(".srt"), utterances, n_speakers, args)
-    write_txt(base.with_suffix(".txt"), utterances, n_speakers, args)
+    log(f"[ผลลัพธ์] เขียนไฟล์ -> {out_dir}/")
+    write_srt(base.with_suffix(".srt"), utterances, n_speakers, args, names)
+    write_txt(base.with_suffix(".txt"), utterances, n_speakers, args, names)
     meta = {
         "source": str(src),
         "model": args.model,
         "task": args.task,
         **info,
         "num_speakers": n_speakers,
+        **({"speaker_names": names} if names else {}),
     }
     write_json(base.with_suffix(".json"), utterances, meta)
+    if summary_md:
+        base.with_suffix(".summary.md").write_text(summary_md, encoding="utf-8")
+    if not args.no_docx:
+        from docx_export import export_docx
+        export_docx(str(base.with_suffix(".docx")), utterances, meta, summary_md)
 
     log("-" * 56)
     log("เสร็จเรียบร้อย! ไฟล์ผลลัพธ์:")
-    for ext in (".srt", ".txt", ".json"):
+    exts = [".srt", ".txt", ".json"] + ([".summary.md"] if summary_md else []) \
+        + ([] if args.no_docx else [".docx"])
+    for ext in exts:
         log(f"  - {base.with_suffix(ext).name}")
     log(f"  จำนวนผู้พูด: {n_speakers} | ประโยค: {len(utterances)} | คำ: {len(words)}")
 

@@ -13,7 +13,10 @@ token ใด ๆ — เหมาะกับไฟล์บันทึกก�
 |---|---|
 | ถอดเสียงภาษาไทย (timestamp ระดับคำ) | Whisper ผ่าน faster-whisper (CTranslate2) |
 | แยกบุคคลที่พูด (speaker diarization) | ECAPA-TDNN embeddings + clustering |
+| ตั้งชื่อผู้พูดจริง | ระบุ "สมชาย,สุชาดา" แทน "ผู้พูด 1,2" |
 | คำบรรยาย | SRT พร้อมชื่อผู้พูด + TXT + JSON |
+| บันทึกการประชุม Word (.docx) | หัวกระดาษ + ตารางข้อมูล + บทถอดความ (สร้างเสมอ) |
+| สรุปการประชุม (MoM) | LLM ผ่าน API แบบ OpenAI-compatible (ไม่บังคับ) |
 
 รองรับไฟล์เสียง/วิดีโอแทบทุกนามสกุล (mp3, wav, m4a, mp4, mkv, aac, ogg, flac ฯลฯ)
 ผ่าน ffmpeg
@@ -22,7 +25,23 @@ token ใด ๆ — เหมาะกับไฟล์บันทึกก�
 
 - `<ชื่อไฟล์>.srt` — คำบรรยายพร้อมชื่อผู้พูด (เปิดกับ VLC/IINA หรือเบิร์นลงวิดีโอได้)
 - `<ชื่อไฟล์>.txt` — บทถอดความอ่านรวดเดียว พร้อมเวลาและชื่อผู้พูด
+- `<ชื่อไฟล์>.docx` — บันทึกการประชุม Word: หัวกระดาษ + ตารางข้อมูล + บทถอดความ
 - `<ชื่อไฟล์>.json` — ข้อมูลดิบครบทุกคำ (เวลา/ผู้พูด/ความมั่นใจ) สำหรับนำไปประมวลผลต่อ
+- `<ชื่อไฟล์>.summary.md` — สรุปการประชุม (ภาพรวม/ประเด็น/มติ/สิ่งที่ต้องทำต่อ) เฉพาะเมื่อใช้ `--summarize`
+
+## การสรุปการประชุม (MoM) ด้วย AI
+
+รองรับ LLM ใดก็ได้ที่มี API แบบ OpenAI-compatible (OpenAI, DeepSeek, GLM,
+OpenRouter, หรือ LLM ในเครื่องผ่าน ollama/LM Studio) — ตั้งค่าผ่านตัวแปรสภาพแวดล้อม:
+
+```bash
+export SUMMARY_API_KEY=sk-...                       # จำเป็น
+export SUMMARY_BASE_URL=https://api.openai.com/v1   # เปลี่ยนเป็นผู้ให้บริการอื่นได้
+export SUMMARY_MODEL=gpt-4o-mini                    # โมเดลที่ใช้สรุป
+```
+
+ถอดเสียงทำงาน offline ทั้งหมดเสมอ — ไม่มีข้อมูลถูกส่งออกนอกเครื่อง เว้นแต่จะเปิดใช้
+`--summarize` (จะส่งเฉพาะ "บทถอดความ" ไปยัง API ที่คุณตั้งค่าเท่านั้น)
 
 ## การติดตั้ง
 
@@ -46,6 +65,13 @@ python3.13 -m venv .venv
 
 # ระบุจำนวนผู้พูด (แม่นขึ้นถ้ารู้ล่วงหน้า)
 .venv/bin/python transcribe.py meeting.mp3 --speakers 3
+
+# ใช้ชื่อจริงของผู้พูด (เรียงตามลำดับคนที่เริ่มพูดก่อน)
+.venv/bin/python transcribe.py meeting.mp3 --speaker-names "สมชาย,สุชาดา,วิภา"
+
+# สรุปการประชุมเป็น MoM ด้วย AI (ตั้งค่า SUMMARY_API_KEY ก่อน)
+export SUMMARY_API_KEY=sk-...   # และ/หรือ SUMMARY_BASE_URL, SUMMARY_MODEL
+.venv/bin/python transcribe.py meeting.mp3 --summarize
 
 # อยากได้คำบรรยายสะอาด ๆ ไม่มีชื่อผู้พูด (เช่นจะเบิร์นลงวิดีโอ)
 .venv/bin/python transcribe.py clip.mp4 --no-speaker-label

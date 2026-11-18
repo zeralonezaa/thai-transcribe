@@ -357,34 +357,37 @@ def split_blocks(words: list[dict], max_chars=80, max_dur=6.0) -> list[list[dict
     return blocks
 
 
-def write_srt(path: Path, utterances, n_speakers: int, args) -> None:
-    tpl = args.speaker_template
-    with path.open("w", encoding="utf-8") as f:
-        idx = 1
-        prev_end = 0.0
-        for u in utterances:
-            for blk in split_blocks(u["words"], args.max_chars, args.max_duration):
-                start = max(blk[0]["start"], prev_end + 0.001)   # กัน timestamp ทับกัน
-                end = max(blk[-1]["end"], start + 0.2)
-                prev_end = end
-                text = "".join(x["raw"] for x in blk).strip()
-                if not text:
-                    continue
-                if not args.no_speaker_label and n_speakers > 1:
-                    text = f"{tpl.format(n=u['speaker'] + 1)}\n{text}"
-                f.write(f"{idx}\n{srt_ts(start)} --> {srt_ts(end)}\n{text}\n\n")
-                idx += 1
+def render_srt(utterances, n_speakers: int, speaker_template="ผู้พูด {n}",
+               max_chars=80, max_duration=6.0, speaker_label=True) -> str:
+    """เรนเดอร์คำบรรยายเป็นข้อความ SRT"""
+    out = []
+    idx = 1
+    prev_end = 0.0
+    for u in utterances:
+        for blk in split_blocks(u["words"], max_chars, max_duration):
+            start = max(blk[0]["start"], prev_end + 0.001)   # กัน timestamp ทับกัน
+            end = max(blk[-1]["end"], start + 0.2)
+            prev_end = end
+            text = "".join(x["raw"] for x in blk).strip()
+            if not text:
+                continue
+            if speaker_label and n_speakers > 1:
+                text = f"{speaker_template.format(n=u['speaker'] + 1)}\n{text}"
+            out.append(f"{idx}\n{srt_ts(start)} --> {srt_ts(end)}\n{text}\n\n")
+            idx += 1
+    return "".join(out)
 
 
-def write_txt(path: Path, utterances, n_speakers: int, args) -> None:
-    tpl = args.speaker_template
-    with path.open("w", encoding="utf-8") as f:
-        for u in utterances:
-            name = tpl.format(n=u["speaker"] + 1) if n_speakers > 1 else "ผู้พูด"
-            f.write(f"[{clock(u['start'])}] {name}: {u['text']}\n")
+def render_txt(utterances, n_speakers: int, speaker_template="ผู้พูด {n}") -> str:
+    """เรนเดอร์บทถอดความเป็นข้อความ TXT"""
+    lines = []
+    for u in utterances:
+        name = speaker_template.format(n=u["speaker"] + 1) if n_speakers > 1 else "ผู้พูด"
+        lines.append(f"[{clock(u['start'])}] {name}: {u['text']}")
+    return "\n".join(lines) + ("\n" if lines else "")
 
 
-def write_json(path: Path, utterances, meta: dict) -> None:
+def render_json(utterances, meta: dict) -> str:
     data = dict(meta)
     data["utterances"] = [
         {
@@ -401,7 +404,97 @@ def write_json(path: Path, utterances, meta: dict) -> None:
         }
         for u in utterances
     ]
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    return json.dumps(data, ensure_ascii=False, indent=2)
+
+
+def write_srt(path: Path, utterances, n_speakers: int, args) -> None:
+    path.write_text(render_srt(utterances, n_speakers, args.speaker_template,
+                               args.max_chars, args.max_duration,
+                               not args.no_speaker_label), encoding="utf-8")
+
+
+def write_txt(path: Path, utterances, n_speakers: int, args) -> None:
+    path.write_text(render_txt(utterances, n_speakers, args.speaker_template),
+                    encoding="utf-8")
+
+
+def write_json(path: Path, utterances, meta: dict) -> None:
+    path.write_text(render_json(utterances, meta), encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# pipeline รวม (ใช้ร่วมกันทั้ง CLI และเว็บแอป)
+# ---------------------------------------------------------------------------
+
+def diarize(audio: np.ndarray, words: list[dict], speakers=None, threshold=0.6):
+    """แยกผู้พูด -> (labels ระดับคำ, จำนวนผู้พูด)"""
+    windows = build_windows(words)
+    # หน้าต่างสั้น ๆ ให้ embedding ไม่น่าเชื่อถือ จึงทำ clustering เฉพาะ
+    # "anchor" (ยาว >= 1.2 วิ) แล้วผูกหน้าต่างสั้นเข้ากับ anchor ที่ใกล้ที่สุด
+    anchors = [w for w in windows if w[1] - w[0] >= 1.2]
+    shorts = [w for w in windows if w[1] - w[0] < 1.2]
+    if len(anchors) < 2:
+        log("      เสียงสั้นเกินไปสำหรับการแยกผู้พูด — ถือว่ามีผู้พูดเดียว")
+        return [0] * len(words), 1
+    X = embed_windows(audio, anchors)
+    anchor_labels = cluster_windows(X, speakers, threshold)
+    all_windows = list(anchors)
+    all_labels = list(anchor_labels)
+    for s in shorts:  # หน้าต่างสั้น -> label ของ anchor ที่ใกล้กันที่สุดตามเวลา
+        c = (s[0] + s[1]) / 2
+        j = min(range(len(anchors)),
+                key=lambda k: abs((anchors[k][0] + anchors[k][1]) / 2 - c))
+        all_windows.append(s)
+        all_labels.append(anchor_labels[j])
+    # จัดเลขผู้พูดตามลำดับการปรากฏครั้งแรก
+    order, remap = [], {}
+    for lab in all_labels:
+        if lab not in remap:
+            remap[lab] = len(order)
+            order.append(lab)
+    win_labels = np.array([remap[l] for l in all_labels])
+    labels = label_words(words, all_windows, win_labels)
+    return labels, len(order)
+
+
+def pipeline(audio: np.ndarray, *, language="th", model_size="large-v3",
+             device="cpu", compute_type=None, speakers=None,
+             cluster_threshold=0.6, no_diarize=False, initial_prompt=None,
+             task="transcribe", cpu_threads=0) -> dict:
+    """ถอดเสียง + แยกผู้พูด ครบสายการผลิต
+
+    คืน dict: {words, utterances, n_speakers, language, language_probability, duration}
+    """
+    class _Opts:  # แปลงพารามิเตอร์ให้เข้ารูปที่ run_whisper ใช้
+        pass
+    opts = _Opts()
+    opts.model = model_size
+    opts.device = device
+    opts.compute_type = compute_type
+    opts.cpu_threads = cpu_threads
+    opts.language = language
+    opts.task = task
+    opts.initial_prompt = initial_prompt
+
+    words, info = run_whisper(audio, opts)
+    if not words:
+        raise RuntimeError("ไม่พบเสียงพูดในไฟล์นี้")
+
+    n_speakers = 1
+    labels = [0] * len(words)
+    if not no_diarize:
+        log("[diarize] แยกผู้พูด (ECAPA embeddings + clustering) ...")
+        labels, n_speakers = diarize(audio, words, speakers, cluster_threshold)
+        log(f"[diarize] จำนวนผู้พูด: {n_speakers}"
+            + (f" (ระบุเอง: {speakers})" if speakers else " (ประมาณอัตโนมัติ)"))
+
+    utterances = fix_leading_fragments(group_utterances(words, labels))
+    return {
+        "words": words,
+        "utterances": utterances,
+        "n_speakers": n_speakers,
+        **info,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -457,49 +550,27 @@ def main(argv=None):
     audio = decode_audio(str(src))
     log(f"      ความยาว ~{clock(len(audio) / SAMPLE_RATE)} นาที:วินาที")
 
-    words, info = run_whisper(audio, args)
-    if not words:
-        sys.exit("ไม่พบเสียงพูดในไฟล์นี้")
+    log("[2/4] ถอดเสียง + [3/4] แยกผู้พูด")
+    result = pipeline(
+        audio,
+        language=args.language,
+        model_size=args.model,
+        device=args.device,
+        compute_type=args.compute_type,
+        speakers=args.speakers,
+        cluster_threshold=args.cluster_threshold,
+        no_diarize=args.no_diarize,
+        initial_prompt=args.initial_prompt,
+        task=args.task,
+        cpu_threads=args.cpu_threads,
+    )
+    words = result["words"]
+    utterances = result["utterances"]
+    n_speakers = result["n_speakers"]
+    info = {"language": result["language"],
+            "language_probability": result["language_probability"],
+            "duration": result["duration"]}
     log(f"      ภาษาที่ตรวจพบ: {info['language']} ({info['language_probability']:.0%})")
-
-    # --- แยกผู้พูด ---
-    n_speakers = 1
-    labels = [0] * len(words)
-    if not args.no_diarize:
-        log("[3/4] แยกผู้พูด (ECAPA embeddings + clustering) ...")
-        windows = build_windows(words)
-        # หน้าต่างสั้น ๆ ให้ embedding ไม่น่าเชื่อถือ จึงทำ clustering เฉพาะ
-        # "anchor" (ยาว >= 1.2 วิ) แล้วผูกหน้าต่างสั้นเข้ากับ anchor ที่ใกล้ที่สุด
-        anchors = [w for w in windows if w[1] - w[0] >= 1.2]
-        shorts = [w for w in windows if w[1] - w[0] < 1.2]
-        if len(anchors) < 2:
-            log("      เสียงสั้นเกินไปสำหรับการแยกผู้พูด — ถือว่ามีผู้พูดเดียว")
-        else:
-            X = embed_windows(audio, anchors)
-            anchor_labels = cluster_windows(X, args.speakers, args.cluster_threshold)
-            all_windows = list(anchors)
-            all_labels = list(anchor_labels)
-            for s in shorts:  # หน้าต่างสั้น -> label ของ anchor ที่ใกล้กันที่สุดตามเวลา
-                c = (s[0] + s[1]) / 2
-                j = min(range(len(anchors)),
-                        key=lambda k: abs((anchors[k][0] + anchors[k][1]) / 2 - c))
-                all_windows.append(s)
-                all_labels.append(anchor_labels[j])
-            # จัดเลขผู้พูดตามลำดับการปรากฏครั้งแรก
-            order, remap = [], {}
-            for lab in all_labels:
-                if lab not in remap:
-                    remap[lab] = len(order)
-                    order.append(lab)
-            win_labels = np.array([remap[l] for l in all_labels])
-            labels = label_words(words, all_windows, win_labels)
-            n_speakers = len(order)
-            log(f"      จำนวนผู้พูด: {n_speakers}"
-                + (f" (ระบุเอง: {args.speakers})" if args.speakers else " (ประมาณอัตโนมัติ)"))
-    else:
-        log("[3/4] ข้ามการแยกผู้พูด (--no-diarize)")
-
-    utterances = fix_leading_fragments(group_utterances(words, labels))
 
     # --- เขียนผลลัพธ์ ---
     log(f"[4/4] เขียนไฟล์ผลลัพธ์ -> {out_dir}/")

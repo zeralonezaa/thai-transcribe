@@ -4,6 +4,9 @@
 **คำบรรยาย (SRT)** ทำงานในเครื่องทั้งหมด (offline) ไม่ต้องใช้ API key หรือ
 token ใด ๆ — เหมาะกับไฟล์บันทึกการประชุม พอดแคสต์ สัมภาษณ์ หรือวิดีโอ
 
+ใช้แบบไม่ต้องติดตั้งได้ที่เว็บ UI: **app.py** (Gradio) — รันในเครื่องหรือ deploy
+ขึ้น [Hugging Face Space](https://huggingface.co/spaces) ได้ (ดูหัวข้อ "เว็บแอป")
+
 ## ความสามารถ
 
 | ฟีเจอร์ | เทคโนโลยี |
@@ -83,6 +86,32 @@ ffmpeg -i video.mp4 -vf subtitles=meeting.srt out.mp4
 
 **ไฟล์ยาวหลายชั่วโมง** — ใช้ `--model medium --device mps` และ `--cpu-threads`
 ตามจำนวน core ของเครื่อง
+
+## เว็บแอป (ไม่ต้องติดตั้ง)
+
+`app.py` เป็นเว็บ UI ภาษาไทย (Gradio) ให้อัปโหลดไฟล์เสียง/วิดีโอ แล้วดาวน์โหลด
+คำบรรยาย SRT + อ่านบทถอดความได้ทันที ใช้ pipeline เดียวกับ CLI
+
+```bash
+# ติดตั้ง dependencies เว็บเพิ่มจาก CLI
+.venv/bin/pip install -r requirements-web.txt
+
+# รันในเครื่อง -> เปิด http://localhost:7860
+.venv/bin/python app.py
+
+# เปิดลิงก์สาธารณะจากเครื่องผ่าน Cloudflare Tunnel (ต้องมี cloudflared)
+./run_public_local.sh
+```
+
+**Deploy ขึ้น Hugging Face Space (ฟรี ถาวร)**
+
+1. สมัครบัญชี [huggingface.co](https://huggingface.co) แล้วรัน
+   `pip install huggingface_hub && huggingface-cli login`
+2. `export HF_USER=<ชื่อบัญชี>` แล้ว `./deploy_space.sh`
+3. ได้เว็บใช้งานสาธารณะที่ `https://huggingface.co/spaces/<ชื่อบัญชี>/thai-transcribe`
+
+ข้อจำกัดของ Space ฟรี (CPU): ไฟล์ยาวไม่เกิน 10 นาที และประมวลผลช้ากว่าเครื่อง
+ตัวเอง — ปรับได้ที่ตัวแปร `MAX_SECONDS` ใน `app.py`
 
 ## แนวทางทำงานภายใน
 

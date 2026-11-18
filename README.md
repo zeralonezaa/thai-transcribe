@@ -54,6 +54,9 @@ python3.13 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 ```
 
+> ย้ายไปรันบนเครื่อง Windows/Linux? ดู **SETUP.md** (มีสคริปต์ติดตั้ง
+> `setup_windows.bat` / `setup.sh` ให้คลิกเดียวจบ)
+
 > ครั้งแรกที่รัน โปรแกรมจะดาวน์โหลดโมเดล Whisper large-v3 (~3 GB) และ
 > ECAPA (~80 MB) เก็บไว้ในเครื่องอัตโนมัติ ครั้งต่อไปจะไม่โหลดซ้ำ
 
